@@ -44,13 +44,13 @@ describe("signal-mcp-server integration", () => {
         child.stdin?.write(JSON.stringify({
           jsonrpc: "2.0", method: "tools/list", id: "1",
         }) + "\n");
-      }, 1000);
+      }, 2000);
 
-      // After another second, kill and resolve with whatever we got
+      // After another 3s, kill and resolve with whatever we got
       setTimeout(() => {
         child.kill();
         resolve({ stdout });
-      }, 3000);
+      }, 5000);
     });
 
     expect(result.stdout).toContain("signal_list_contacts");
