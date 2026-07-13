@@ -51,8 +51,14 @@ curl -X POST http://localhost:3100/ \
 ### Docker
 
 ```bash
+# Pull from GitHub Container Registry
 docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
   ghcr.io/transmitt0r/signal-mcp-server:latest
+
+# Or build locally
+docker build -t signal-mcp-server .
+docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
+  signal-mcp-server
 ```
 
 ## Tools
