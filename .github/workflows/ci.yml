@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Build
+        run: nix build -L --impure
+
+      - name: Check flake
+        run: nix flake check -L --impure
+
+  integration-tests:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Integration tests
+        run: nix develop -c pnpm test:int
+
+  publish-npm:
+    if: github.ref == 'refs/heads/main'
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            # Build from nix, publish the package
+            nix build -L --impure
+            cd result
+            pnpm publish --access public --no-git-checks
+            echo "✅ Published to npm"
+          else
+            echo "⚠️ NPM_TOKEN not set — skipping npm publish"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-docker:
+    if: github.ref == 'refs/heads/main'
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Set lowercase owner
+        run: echo "REPO_OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Build container
+        run: nix build .#container -L --impure
+
+      - name: Load and push
+        run: |
+          docker load < result
+          docker tag ghcr.io/transmitt0r/signal-mcp-server:latest \
+            ghcr.io/${{ env.REPO_OWNER_LC }}/signal-mcp-server:${{ github.sha }}
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ env.REPO_OWNER_LC }} --password-stdin
+          docker push --all-tags ghcr.io/${{ env.REPO_OWNER_LC }}/signal-mcp-server

@@ -1,0 +1,42 @@
+{
+  "name": "signal-mcp-server",
+  "version": "0.3.0",
+  "description": "MCP server for Signal messenger via signal-cli daemon",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "signal-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:unit": "vitest run src/tests/unit.test.ts",
+    "test:int": "vitest run src/tests/signal-cli.test.ts --test-timeout=120000",
+    "start": "node dist/index.js",
+    "prepublishOnly": "pnpm build && pnpm test"
+  },
+  "keywords": [
+    "mcp",
+    "signal",
+    "signal-cli",
+    "messaging"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "testcontainers": "^10.28.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Transmitt0r/signal-mcp-server.git"
+  }
+}
