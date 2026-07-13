@@ -1,97 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-
-// ---------------------------------------------------------------------------
-// Inline implementation of the logic under test (same as src/index.ts)
-// We test the real module via dist/index.js in integration tests.
-// ---------------------------------------------------------------------------
-
-type Envelope = {
-  source?: string;
-  sourceNumber?: string;
-  sourceUuid?: string;
-  sourceName?: string;
-  timestamp?: number;
-  dataMessage?: { message?: string; quote?: { text?: string }; attachments?: Array<{ fileName?: string; contentType?: string }> };
-  syncMessage?: { sentMessage?: { destination?: string; destinationNumber?: string; message?: string } };
-};
-
-type RpcEnvelope = { params?: { envelope?: Envelope } };
-
-class MessageBuffer {
-  private messages: RpcEnvelope[] = [];
-  private seen = new Set<number>();
-
-  add(payload: RpcEnvelope): void {
-    const ts = payload.params?.envelope?.timestamp ?? 0;
-    if (this.seen.has(ts)) return;
-    this.seen.add(ts);
-    this.messages.push(payload);
-    if (this.messages.length > 500) {
-      this.messages = this.messages.slice(-500);
-    }
-  }
-
-  getRecent(limit = 50): RpcEnvelope[] {
-    return this.messages.slice(-limit);
-  }
-
-  getConversation(sender: string, limit = 50): RpcEnvelope[] {
-    const results: RpcEnvelope[] = [];
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const env = this.messages[i]?.params?.envelope;
-      const src = env?.source ?? env?.sourceNumber ?? env?.sourceUuid ?? "";
-      if (src.toLowerCase().includes(sender.toLowerCase())) {
-        results.push(this.messages[i]);
-        if (results.length >= limit) break;
-      }
-    }
-    return results;
-  }
-}
-
-function formatTimestamp(ts: number): string {
-  try {
-    return new Date(ts / 1000).toISOString().replace("T", " ").slice(0, 19);
-  } catch {
-    return String(ts);
-  }
-}
-
-function formatEnvelope(envelope: Envelope): string {
-  const source = envelope.sourceName ?? "";
-  const sourceNumber = envelope.sourceNumber ?? envelope.source ?? "";
-  const ts = envelope.timestamp ?? 0;
-  const dt = ts ? formatTimestamp(ts) : "?";
-
-  const sync = envelope.syncMessage;
-  if (sync?.sentMessage) {
-    const sent = sync.sentMessage;
-    const dest = sent.destinationNumber ?? sent.destination ?? "";
-    const msg = sent.message ?? "";
-    return `[${dt}] 📤 To ${dest}: ${msg}`;
-  }
-
-  const data = envelope.dataMessage;
-  if (!data) return `[${dt}] (unknown message type)`;
-
-  const msg = data.message ?? "";
-  const quote = data.quote;
-  const quotedText = quote?.text ? ` (replying to: ${quote.text.slice(0, 80)})` : "";
-
-  const attachments = data.attachments;
-  let attachmentInfo = "";
-  if (attachments?.length) {
-    const names = attachments.map((a) => a.fileName ?? a.contentType ?? "file");
-    attachmentInfo = ` [${names.join(", ")}]`;
-  }
-
-  const nameStr = source ? ` (${source})` : "";
-  return `[${dt}] ${sourceNumber}${nameStr}: ${msg}${quotedText}${attachmentInfo}`;
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+import { MessageBuffer, formatTimestamp, formatEnvelope, type Envelope, type RpcEnvelope } from "../lib.js";
 
 describe("MessageBuffer", () => {
   let buffer: MessageBuffer;
@@ -107,21 +15,27 @@ describe("MessageBuffer", () => {
   it("stores and retrieves messages", () => {
     const msg: RpcEnvelope = {
       params: {
-        envelope: { source: "+49123456789", sourceName: "Alice", timestamp: 1700000000000, dataMessage: { message: "Hello!" } },
+        envelope: { source: "+491****6789", sourceName: "Alice", timestamp: 1700000000000, dataMessage: { message: "Hello!" } },
       },
     };
     buffer.add(msg);
     expect(buffer.getRecent()).toHaveLength(1);
-    expect(buffer.getRecent()[0].params!.envelope!.source).toBe("+49123456789");
+    expect(buffer.getRecent()[0].params!.envelope!.source).toBe("+491****6789");
   });
 
-  it("deduplicates by timestamp", () => {
+  it("deduplicates by source:timestamp composite key", () => {
     const msg: RpcEnvelope = {
-      params: { envelope: { source: "+49123456789", timestamp: 100, dataMessage: { message: "Hello!" } } },
+      params: { envelope: { source: "+491****6789", timestamp: 100, dataMessage: { message: "Hello!" } } },
     };
     buffer.add(msg);
     buffer.add(msg);
     expect(buffer.getRecent()).toHaveLength(1);
+  });
+
+  it("allows same timestamp from different sources", () => {
+    buffer.add({ params: { envelope: { source: "+49A", timestamp: 100, dataMessage: { message: "A" } } } });
+    buffer.add({ params: { envelope: { source: "+49B", timestamp: 100, dataMessage: { message: "B" } } } });
+    expect(buffer.getRecent()).toHaveLength(2);
   });
 
   it("filters by sender", () => {
@@ -142,37 +56,50 @@ describe("MessageBuffer", () => {
   });
 });
 
+describe("formatTimestamp", () => {
+  it("formats a millisecond timestamp correctly", () => {
+    // 1700000000000ms = 2023-11-14 22:13:20 UTC
+    const result = formatTimestamp(1700000000000);
+    expect(result).toBe("2023-11-14 22:13:20");
+  });
+
+  it("handles 0", () => {
+    const result = formatTimestamp(0);
+    expect(result).toBe("1970-01-01 00:00:00");
+  });
+});
+
 describe("formatEnvelope", () => {
   it("formats a data message", () => {
-    const env: Envelope = { source: "+49123456789", sourceName: "Alice", timestamp: 1700000000000, dataMessage: { message: "Hey there" } };
+    const env: Envelope = { source: "+491****6789", sourceName: "Alice", timestamp: 1700000000000, dataMessage: { message: "Hey there" } };
     const result = formatEnvelope(env);
-    expect(result).toContain("+49123456789");
+    expect(result).toContain("+491****6789");
     expect(result).toContain("Alice");
     expect(result).toContain("Hey there");
   });
 
   it("formats a sync message (sent by you)", () => {
-    const env: Envelope = { syncMessage: { sentMessage: { destinationNumber: "+491111111111", message: "I'll be there soon" } }, timestamp: 1700000000000 };
+    const env: Envelope = { syncMessage: { sentMessage: { destinationNumber: "+491****1111", message: "I'll be there soon" } }, timestamp: 1700000000000 };
     const result = formatEnvelope(env);
     expect(result).toContain("📤");
-    expect(result).toContain("+491111111111");
+    expect(result).toContain("+491****1111");
     expect(result).toContain("I'll be there soon");
   });
 
   it("includes quoted text", () => {
-    const env: Envelope = { source: "+49123456789", timestamp: 1700000000000, dataMessage: { message: "Yes!", quote: { text: "Are you coming?" } } };
+    const env: Envelope = { source: "+491****6789", timestamp: 1700000000000, dataMessage: { message: "Yes!", quote: { text: "Are you coming?" } } };
     const result = formatEnvelope(env);
     expect(result).toContain("Are you coming?");
   });
 
   it("includes attachment info", () => {
-    const env: Envelope = { source: "+49123456789", timestamp: 1700000000000, dataMessage: { message: "Check this", attachments: [{ fileName: "photo.jpg", contentType: "image/jpeg" }] } };
+    const env: Envelope = { source: "+491****6789", timestamp: 1700000000000, dataMessage: { message: "Check this", attachments: [{ fileName: "photo.jpg", contentType: "image/jpeg" }] } };
     const result = formatEnvelope(env);
     expect(result).toContain("photo.jpg");
   });
 
   it("handles missing data gracefully", () => {
-    const env: Envelope = { source: "+49123456789", timestamp: 1700000000000 };
+    const env: Envelope = { source: "+491****6789", timestamp: 1700000000000 };
     const result = formatEnvelope(env);
     expect(result).toContain("unknown message type");
   });

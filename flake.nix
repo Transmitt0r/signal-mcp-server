@@ -28,9 +28,10 @@
 
           installPhase = ''
             mkdir -p $out
-            cp -r dist package.json node_modules $out/
+            cp -r dist package.json $out/
           '';
 
+          # Tests require a running signal-cli daemon — skip in build derivation
           doCheck = false;
         };
 

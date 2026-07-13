@@ -22,87 +22,18 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { MessageBuffer, formatEnvelope, type RpcEnvelope } from "./lib.js";
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const SIGNAL_HTTP_URL = process.env.SIGNAL_HTTP_URL ?? "http://127.0.0.1:8080";
 const SIGNAL_ACCOUNT = process.env.SIGNAL_ACCOUNT ?? "";
-const MAX_MESSAGE_BUFFER = parseInt(process.env.SIGNAL_MCP_MAX_MSGS ?? "500", 10);
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface Envelope {
-  source?: string;
-  sourceNumber?: string;
-  sourceUuid?: string;
-  sourceName?: string;
-  sourceDevice?: number;
-  timestamp?: number;
-  dataMessage?: DataMessage;
-  syncMessage?: SyncMessage;
-}
-
-interface DataMessage {
-  timestamp?: number;
-  message?: string;
-  quote?: { text?: string };
-  attachments?: Array<{ fileName?: string; contentType?: string }>;
-}
-
-interface SyncMessage {
-  sentMessage?: SentMessage;
-}
-
-interface SentMessage {
-  destination?: string;
-  destinationNumber?: string;
-  destinationUuid?: string;
-  timestamp?: number;
-  message?: string;
-}
-
-interface RpcEnvelope {
-  params?: { envelope?: Envelope };
-}
 
 // ---------------------------------------------------------------------------
 // Message Buffer
 // ---------------------------------------------------------------------------
-
-class MessageBuffer {
-  private messages: RpcEnvelope[] = [];
-  private seen = new Set<number>();
-
-  add(payload: RpcEnvelope): void {
-    const ts = payload.params?.envelope?.timestamp ?? 0;
-    if (this.seen.has(ts)) return;
-    this.seen.add(ts);
-    this.messages.push(payload);
-    if (this.messages.length > MAX_MESSAGE_BUFFER) {
-      this.messages = this.messages.slice(-MAX_MESSAGE_BUFFER);
-    }
-  }
-
-  getRecent(limit = 50): RpcEnvelope[] {
-    return this.messages.slice(-limit);
-  }
-
-  getConversation(sender: string, limit = 50): RpcEnvelope[] {
-    const results: RpcEnvelope[] = [];
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const env = this.messages[i]?.params?.envelope;
-      const src = env?.source ?? env?.sourceNumber ?? env?.sourceUuid ?? "";
-      if (src.toLowerCase().includes(sender.toLowerCase())) {
-        results.push(this.messages[i]);
-        if (results.length >= limit) break;
-      }
-    }
-    return results;
-  }
-}
 
 const buffer = new MessageBuffer();
 
@@ -110,23 +41,30 @@ const buffer = new MessageBuffer();
 // SSE consumer
 // ---------------------------------------------------------------------------
 
+let sseAbortController: AbortController | null = null;
+
 function startSseConsumer(): void {
   const eventsUrl = `${SIGNAL_HTTP_URL}/api/v1/events`;
   console.error(`[signal-mcp] SSE consumer starting: ${eventsUrl}`);
 
+  sseAbortController = new AbortController();
+  const signal = sseAbortController.signal;
+
   const poll = async () => {
+    if (signal.aborted) return;
+
     try {
-      const resp = await fetch(eventsUrl);
+      const resp = await fetch(eventsUrl, { signal });
       if (!resp.ok || !resp.body) {
         console.error(`[signal-mcp] SSE: response status ${resp.status}, retrying in 5s`);
-        setTimeout(poll, 5000);
+        if (!signal.aborted) setTimeout(poll, 5000);
         return;
       }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
 
-      while (true) {
+      while (!signal.aborted) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
@@ -150,12 +88,20 @@ function startSseConsumer(): void {
         }
       }
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
       console.error(`[signal-mcp] SSE connection error: ${err}, reconnecting in 5s`);
     }
-    setTimeout(poll, 5000);
+    if (!signal.aborted) setTimeout(poll, 5000);
   };
 
   poll();
+}
+
+function stopSseConsumer(): void {
+  if (sseAbortController) {
+    sseAbortController.abort();
+    sseAbortController = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,50 +129,6 @@ async function rpc(method: string, params?: Record<string, unknown>, timeout = 1
   } finally {
     clearTimeout(timer);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
-
-function formatTimestamp(ts: number): string {
-  try {
-    return new Date(ts / 1000).toISOString().replace("T", " ").slice(0, 19);
-  } catch {
-    return String(ts);
-  }
-}
-
-function formatEnvelope(envelope: Envelope): string {
-  const source = envelope.sourceName ?? "";
-  const sourceNumber = envelope.sourceNumber ?? envelope.source ?? "";
-  const ts = envelope.timestamp ?? 0;
-  const dt = ts ? formatTimestamp(ts) : "?";
-
-  const sync = envelope.syncMessage;
-  if (sync?.sentMessage) {
-    const sent = sync.sentMessage;
-    const dest = sent.destinationNumber ?? sent.destination ?? "";
-    const msg = sent.message ?? "";
-    return `[${dt}] 📤 To ${dest}: ${msg}`;
-  }
-
-  const data = envelope.dataMessage;
-  if (!data) return `[${dt}] (unknown message type)`;
-
-  const msg = data.message ?? "";
-  const quote = data.quote;
-  const quotedText = quote?.text ? ` (replying to: ${quote.text.slice(0, 80)})` : "";
-
-  const attachments = data.attachments;
-  let attachmentInfo = "";
-  if (attachments?.length) {
-    const names = attachments.map((a) => a.fileName ?? a.contentType ?? "file");
-    attachmentInfo = ` [${names.join(", ")}]`;
-  }
-
-  const nameStr = source ? ` (${source})` : "";
-  return `[${dt}] ${sourceNumber}${nameStr}: ${msg}${quotedText}${attachmentInfo}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +211,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        sender: { type: "string", description: "Optional sender phone number (E.164 like +49123456789) or UUID to filter by" },
+        sender: { type: "string", description: "Optional sender phone number (E.164 like +491****6789) or UUID to filter by" },
         limit: { type: "integer", description: "Max messages to return", default: 20 },
       },
     },
@@ -332,7 +234,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        recipient: { type: "string", description: "Recipient phone number in E.164 format (e.g. +49123456789)" },
+        recipient: { type: "string", description: "Recipient phone number in E.164 format (e.g. +491****6789)" },
         message: { type: "string", description: "Message text to send" },
         groupId: { type: "string", description: "Base64-encoded group ID to send to instead of a recipient" },
       },
@@ -413,7 +315,7 @@ async function main(): Promise<void> {
   }
 
   const server = new Server(
-    { name: "signal-mcp-server", version: "0.2.0" },
+    { name: "signal-mcp-server", version: "0.3.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -466,6 +368,16 @@ async function main(): Promise<void> {
 
       await transport.handleRequest(req, res);
     });
+
+    // Graceful shutdown
+    const shutdown = () => {
+      console.error("[signal-mcp] Shutting down...");
+      stopSseConsumer();
+      httpServer.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
 
     httpServer.listen(httpPort, () => {
       console.error(`[signal-mcp] HTTP server listening on http://0.0.0.0:${httpPort}`);

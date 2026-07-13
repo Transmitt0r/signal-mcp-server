@@ -1,6 +1,4 @@
 node_modules/
-dist/tests/
 *.tsbuildinfo
 .env
-.pnpm-store/dist/
 dist/
