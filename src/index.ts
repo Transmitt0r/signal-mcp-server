@@ -139,6 +139,7 @@ async function receiveOnce(): Promise<"ok" | "already-receiving" | "error"> {
       "receive",
       { timeout: RECEIVE_POLL_TIMEOUT_SECONDS },
       (RECEIVE_POLL_TIMEOUT_SECONDS + 15) * 1000,
+      receivePollAbort.signal,
     );
     const n = ingestReceiveResult(result);
     if (n > 0) console.error(`[signal-mcp] Ingested ${n} message(s) via receive poll`);
@@ -188,19 +189,27 @@ function stopReceivePoller(): void {
 // JSON-RPC client
 // ---------------------------------------------------------------------------
 
-async function rpc(method: string, params?: Record<string, unknown>, timeout = 15000): Promise<unknown> {
+async function rpc(
+  method: string,
+  params?: Record<string, unknown>,
+  timeout = 15000,
+  externalSignal?: AbortSignal,
+): Promise<unknown> {
   const rpcUrl = `${SIGNAL_HTTP_URL}/api/v1/rpc`;
   const payload = { jsonrpc: "2.0", method, id: method, ...(params ? { params } : {}) };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), timeout);
+  const signal = externalSignal
+    ? AbortSignal.any([timeoutController.signal, externalSignal])
+    : timeoutController.signal;
 
   try {
     const resp = await fetch(rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal,
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
     const data = (await resp.json()) as { result?: unknown; error?: { message?: string } };
