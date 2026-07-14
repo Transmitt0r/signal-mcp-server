@@ -81,30 +81,71 @@ docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
 | `SIGNAL_MCP_MAX_MSGS` | `500` | Default number of messages returned per query when no explicit limit is given |
 | `SIGNAL_MCP_STATE_DIR` | `$XDG_STATE_HOME/signal-mcp-server` (falls back to `~/.local/state/signal-mcp-server`) | Directory holding the persisted message database (`messages.db`) |
 | `SIGNAL_MCP_NO_PERSIST` | unset | Set to `1`/`true` to disable disk persistence entirely (buffer becomes memory-only, matching pre-persistence behavior) |
+| `SIGNAL_MCP_RECEIVE_LOG` | unset | Path to signal-cli's JSON receive log (see "Closing the message-loss gap" below). Strongly recommended — this is what actually prevents missed messages, not just SSE reconnect tuning. |
+
+## Closing the message-loss gap (recommended setup)
+
+By default this server ingests messages purely via signal-cli's SSE stream
+(`/api/v1/events`), which has a fundamental limitation: **signal-cli does not
+queue or replay missed messages for SSE subscribers.** Its daemon keeps a
+permanent, always-on receive thread (started via `--receive-mode on-start`)
+that continuously drains the server queue and deletes each envelope from its
+own disk cache the instant it's handled — regardless of whether any SSE
+client is connected. The SSE endpoint registers its subscription as a *weak*
+listener (`HttpServerHandler#subscribeReceiveHandlers`, `isWeakListener=true`):
+it only receives whatever arrives while the HTTP connection happens to be
+open. If this MCP server (or its SSE connection) is down when a message
+arrives, that message is gone for good — persistence doesn't help, because
+the message was never captured in the first place.
+
+**The fix**: signal-cli's *default* receive handler — the one active when you
+start the daemon with `-o json` and redirect its stdout to a file — is
+registered as a **strong** listener, tied to the daemon process itself
+rather than to any one HTTP client. Every message gets written to that file
+unconditionally, independent of whether anything is listening. Point
+`SIGNAL_MCP_RECEIVE_LOG` at that file and this server tails it with a durable
+byte-offset checkpoint (stored in the SQLite buffer), so a restart resumes
+exactly where it left off and catches up on everything written while it was
+down — actually closing the gap, not just shrinking it.
+
+Setup (systemd user service shown; adapt for your init system):
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/signal-cli -o json --account +1XXXXXXXXXX daemon --http 127.0.0.1:8081
+StandardOutput=append:/path/to/state/signal-cli/receive.jsonl
+```
+
+```bash
+export SIGNAL_MCP_RECEIVE_LOG=/path/to/state/signal-cli/receive.jsonl
+```
+
+Without this, the server still works out of the box via SSE alone, but any
+message that arrives during a disconnect (deploys, restarts, network blips)
+is silently missed.
 
 ## Architecture
 
 The server connects to a running signal-cli daemon via its JSON-RPC HTTP API. It
-uses two main components:
+uses three main components:
+
+- **Receive-log tailer** (primary ingestion path, when `SIGNAL_MCP_RECEIVE_LOG`
+  is set): reads new bytes appended to signal-cli's JSON receive log, parses
+  each JSON-Lines entry (non-JSON lines — signal-cli's own startup/warning
+  logs share the same stdout — are skipped), and tracks its position via a
+  durable byte offset. Uses `fs.watch` for low-latency pickup with a 2s
+  polling backstop for filesystems where watch events aren't reliable.
 
 - **SSE consumer**: Opens a long-lived connection to the signal-cli event stream
   (`/api/v1/events`) and parses Server-Sent Events into `RpcEnvelope` objects.
   An `AbortController` allows clean shutdown on `SIGINT`/`SIGTERM`. Reconnects
   use exponential backoff starting at 250ms (capped at 5s) rather than a flat
   5s delay, to minimize the window in which an incoming message could be
-  missed during a restart or network blip.
+  missed during a restart or network blip. Runs unconditionally (even
+  alongside the receive-log tailer) since it works with zero extra signal-cli
+  configuration and message-level deduplication makes it harmless to
+  double-ingest the same envelope via both paths.
 
-  **Known limitation**: signal-cli's daemon does not queue or replay missed
-  messages to SSE subscribers. It keeps a permanent, always-on receive thread
-  (started via `--receive-mode on-start`) that continuously drains the server
-  queue regardless of whether any SSE client is connected, and deletes each
-  envelope from its own disk cache the instant it's handled — there is no
-  server-side backlog to catch up on after a reconnect. If this MCP server
-  (or its SSE connection) is down when a message arrives, that message is
-  lost from this tool's perspective, even though persistence (above) means
-  everything captured *while connected* survives restarts. Minimizing
-  reconnect latency (as described above) is the only mitigation available
-  without patching signal-cli itself.
 
 - **Message buffer**: Backed by a local SQLite database
   (`$SIGNAL_MCP_STATE_DIR/messages.db`, via `better-sqlite3`) rather than an
