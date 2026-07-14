@@ -262,10 +262,10 @@ const TOOLS = [
     },
     handler: async (args: Record<string, unknown>) => {
       const limit = Math.min((args.limit as number) ?? 20, 100);
-      const recent = buffer.getRecent(500);
+      const recent = buffer.getRecent(500); // oldest-first; walk newest-first below
       const seen = new Map<string, string>();
-      for (const msg of recent) {
-        const env = msg.params?.envelope;
+      for (let i = recent.length - 1; i >= 0; i--) {
+        const env = recent[i].params?.envelope;
         const src = env?.sourceNumber ?? env?.source ?? "";
         const srcName = env?.sourceName ?? "";
         if (src && !seen.has(src)) seen.set(src, srcName);
