@@ -1,5 +1,5 @@
 {
-  "name": "signal-mcp-server",
+  "name": "@transmitt0r/signal-mcp-server",
   "version": "0.4.0",
   "description": "MCP server for Signal messenger via signal-cli daemon",
   "type": "module",
@@ -37,6 +37,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Transmitt0r/signal-mcp-server.git"

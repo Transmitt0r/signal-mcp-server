@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for Signal messenger. Wraps a running
 [signal-cli](https://github.com/AsamK/signal-cli) daemon's JSON-RPC API as MCP tools.
 
 [![CI](https://github.com/Transmitt0r/signal-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/Transmitt0r/signal-mcp-server/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/signal-mcp-server)](https://www.npmjs.com/package/signal-mcp-server)
+[![npm version](https://img.shields.io/npm/v/%40transmitt0r%2Fsignal-mcp-server)](https://www.npmjs.com/package/@transmitt0r/signal-mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Prerequisites
@@ -20,7 +20,7 @@ MCP (Model Context Protocol) server for Signal messenger. Wraps a running
 ### Stdio (for Hermes MCP, Claude Desktop, etc.)
 
 ```bash
-SIGNAL_HTTP_URL=http://127.0.0.1:8080 npx signal-mcp-server
+SIGNAL_HTTP_URL=http://127.0.0.1:8080 npx @transmitt0r/signal-mcp-server
 ```
 
 Configure in Hermes:
@@ -29,7 +29,7 @@ Configure in Hermes:
 mcp_servers:
   signal:
     command: "npx"
-    args: ["-y", "signal-mcp-server"]
+    args: ["-y", "@transmitt0r/signal-mcp-server"]
     env:
       SIGNAL_HTTP_URL: "http://127.0.0.1:8080"
       SIGNAL_ACCOUNT: "+491****6789"

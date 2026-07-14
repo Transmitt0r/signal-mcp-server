@@ -134,6 +134,9 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Update npm for trusted publishing support
+        run: npm install -g npm@latest
+
       - name: Publish to npm via OIDC
         run: npm publish --access public
 
