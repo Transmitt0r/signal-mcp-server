@@ -76,7 +76,7 @@ docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SIGNAL_HTTP_URL` | `http://127.0.0.1:8080` | signal-cli HTTP endpoint |
+- `SIGNAL_HTTP_URL` | `http://127.0.0.1:8081` | signal-cli HTTP endpoint |
 | `SIGNAL_ACCOUNT` | `""` | Phone number for display (optional) |
 | `SIGNAL_MCP_MAX_MSGS` | `500` | Max messages to buffer in memory |
 

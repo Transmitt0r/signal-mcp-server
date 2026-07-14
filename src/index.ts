@@ -28,7 +28,7 @@ import { MessageBuffer, formatEnvelope, type RpcEnvelope } from "./lib.js";
 // Config
 // ---------------------------------------------------------------------------
 
-const SIGNAL_HTTP_URL = process.env.SIGNAL_HTTP_URL ?? "http://127.0.0.1:8080";
+const SIGNAL_HTTP_URL = process.env.SIGNAL_HTTP_URL ?? "http://127.0.0.1:8081";
 const SIGNAL_ACCOUNT = process.env.SIGNAL_ACCOUNT ?? "";
 
 // ---------------------------------------------------------------------------
