@@ -59,8 +59,29 @@ if (!NO_PERSIST) {
 // ---------------------------------------------------------------------------
 // SSE consumer
 // ---------------------------------------------------------------------------
+//
+// IMPORTANT: signal-cli does NOT queue/replay missed messages for SSE
+// clients. Its daemon keeps a permanent, always-on receive thread (started
+// at daemon boot via --receive-mode on-start) that continuously drains the
+// server queue and deletes each envelope from its on-disk cache the instant
+// it's handed to handlers — regardless of whether any SSE client is
+// connected. Our SSE subscription is registered as a "weak" handler
+// (HttpServerHandler#subscribeReceiveHandlers, isWeakListener=true): it only
+// receives whatever arrives while the HTTP connection is open. There is no
+// backlog to drain on reconnect — a message that arrives while we're
+// disconnected is gone for good, full stop.
+//
+// The only gap we can actually close is our OWN reconnect latency. Previously
+// this used a flat 5s delay on every retry, including the very first retry
+// right after our own restart — pure dead time in the exact window most
+// likely to lose a message (our deploys/restarts). Now we retry immediately
+// with a short exponential backoff (250ms, 500ms, 1s, 2s, capped at 5s),
+// and log how long we were actually disconnected so gaps are diagnosable.
 
 let sseAbortController: AbortController | null = null;
+
+const SSE_RETRY_BASE_MS = 250;
+const SSE_RETRY_MAX_MS = 5000;
 
 function startSseConsumer(): void {
   const eventsUrl = `${SIGNAL_HTTP_URL}/api/v1/events`;
@@ -68,6 +89,15 @@ function startSseConsumer(): void {
 
   sseAbortController = new AbortController();
   const signal = sseAbortController.signal;
+  let retryAttempt = 0;
+  let disconnectedAt: number | null = null;
+
+  const scheduleRetry = () => {
+    if (signal.aborted) return;
+    const delay = Math.min(SSE_RETRY_BASE_MS * 2 ** retryAttempt, SSE_RETRY_MAX_MS);
+    retryAttempt += 1;
+    setTimeout(poll, delay);
+  };
 
   const poll = async () => {
     if (signal.aborted) return;
@@ -75,10 +105,20 @@ function startSseConsumer(): void {
     try {
       const resp = await fetch(eventsUrl, { signal });
       if (!resp.ok || !resp.body) {
-        console.error(`[signal-mcp] SSE: response status ${resp.status}, retrying in 5s`);
-        if (!signal.aborted) setTimeout(poll, 5000);
+        console.error(`[signal-mcp] SSE: response status ${resp.status}, retrying`);
+        scheduleRetry();
         return;
       }
+
+      // Connected: reset backoff and report how long we were dark, if this
+      // was a reconnect rather than the initial startup connection.
+      retryAttempt = 0;
+      if (disconnectedAt !== null) {
+        const gapMs = Date.now() - disconnectedAt;
+        console.error(`[signal-mcp] SSE reconnected after ${gapMs}ms disconnected`);
+        disconnectedAt = null;
+      }
+
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -108,15 +148,21 @@ function startSseConsumer(): void {
           }
         }
       }
+      if (!signal.aborted) {
+        disconnectedAt = Date.now();
+        console.error("[signal-mcp] SSE stream ended, reconnecting immediately");
+      }
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
-      console.error(`[signal-mcp] SSE connection error: ${err}, reconnecting in 5s`);
+      disconnectedAt ??= Date.now();
+      console.error(`[signal-mcp] SSE connection error: ${err}, retrying`);
     }
-    if (!signal.aborted) setTimeout(poll, 5000);
+    scheduleRetry();
   };
 
   poll();
 }
+
 
 function stopSseConsumer(): void {
   if (sseAbortController) {

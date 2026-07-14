@@ -89,7 +89,22 @@ uses two main components:
 
 - **SSE consumer**: Opens a long-lived connection to the signal-cli event stream
   (`/api/v1/events`) and parses Server-Sent Events into `RpcEnvelope` objects.
-  An `AbortController` allows clean shutdown on `SIGINT`/`SIGTERM`.
+  An `AbortController` allows clean shutdown on `SIGINT`/`SIGTERM`. Reconnects
+  use exponential backoff starting at 250ms (capped at 5s) rather than a flat
+  5s delay, to minimize the window in which an incoming message could be
+  missed during a restart or network blip.
+
+  **Known limitation**: signal-cli's daemon does not queue or replay missed
+  messages to SSE subscribers. It keeps a permanent, always-on receive thread
+  (started via `--receive-mode on-start`) that continuously drains the server
+  queue regardless of whether any SSE client is connected, and deletes each
+  envelope from its own disk cache the instant it's handled — there is no
+  server-side backlog to catch up on after a reconnect. If this MCP server
+  (or its SSE connection) is down when a message arrives, that message is
+  lost from this tool's perspective, even though persistence (above) means
+  everything captured *while connected* survives restarts. Minimizing
+  reconnect latency (as described above) is the only mitigation available
+  without patching signal-cli itself.
 
 - **Message buffer**: Backed by a local SQLite database
   (`$SIGNAL_MCP_STATE_DIR/messages.db`, via `better-sqlite3`) rather than an
