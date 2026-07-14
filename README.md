@@ -91,6 +91,7 @@ docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
 | `SIGNAL_HTTP_URL` | `http://127.0.0.1:8080` | signal-cli HTTP endpoint |
 | `SIGNAL_ACCOUNT` | `""` | Phone number for display (optional) |
 | `SIGNAL_MCP_MAX_MSGS` | `500` | Default number of messages returned per query when no explicit limit is given |
+| `SIGNAL_MCP_MAX_STORED` | `100000` | Maximum number of messages retained in the database; oldest are pruned once exceeded |
 | `SIGNAL_MCP_STATE_DIR` | `$XDG_STATE_HOME/signal-mcp-server` (falls back to `~/.local/state/signal-mcp-server`) | Directory holding the persisted message database (`messages.db`) |
 | `SIGNAL_MCP_NO_PERSIST` | unset | Set to `1`/`true` to disable disk persistence entirely (buffer becomes memory-only, matching pre-persistence behavior) |
 | `SIGNAL_MCP_HTTP_TOKEN` | none (required for `--http`) | Bearer token clients must send as `Authorization: Bearer <token>` when using the HTTP transport |

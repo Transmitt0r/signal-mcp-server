@@ -74,6 +74,18 @@ describe("MessageBuffer (in-memory)", () => {
     expect(recent.map((m) => m.params!.envelope!.dataMessage!.message)).toEqual(["msg0", "msg1", "msg2", "msg3", "msg4"]);
   });
 
+  it("prunes oldest messages once maxStored is exceeded", () => {
+    const capped = new MessageBuffer({ maxStored: 50 });
+    for (let i = 0; i < 500; i++) {
+      capped.add({ params: { envelope: { source: "+49X", timestamp: i, dataMessage: { message: `msg${i}` } } } });
+    }
+    expect(capped.count()).toBe(50);
+    const recent = capped.getRecent(50);
+    expect(recent[0].params!.envelope!.timestamp).toBe(450);
+    expect(recent[49].params!.envelope!.timestamp).toBe(499);
+    capped.close();
+  });
+
   it("respects the limit parameter without capping total storage", () => {
     for (let i = 0; i < 600; i++) {
       buffer.add({ params: { envelope: { source: "+49X", timestamp: i, dataMessage: { message: `msg${i}` } } } });

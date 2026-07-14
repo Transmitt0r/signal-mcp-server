@@ -12,6 +12,8 @@
  *   SIGNAL_HTTP_URL          — signal-cli HTTP endpoint (default: http://127.0.0.1:8080)
  *   SIGNAL_ACCOUNT           — phone number for display (optional)
  *   SIGNAL_MCP_MAX_MSGS      — max messages returned per query by default (default: 500)
+ *   SIGNAL_MCP_MAX_STORED    — max messages retained in the database; oldest are
+ *                              pruned once exceeded (default: 100000)
  *   SIGNAL_MCP_STATE_DIR     — directory for the persisted message database
  *                              (default: $XDG_STATE_HOME/signal-mcp-server or
  *                              ~/.local/state/signal-mcp-server)

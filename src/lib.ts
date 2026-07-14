@@ -51,6 +51,8 @@ export function toSafeLimit(value: unknown, fallback: number): number {
 }
 
 const DEFAULT_QUERY_LIMIT = toSafeLimit(process.env.SIGNAL_MCP_MAX_MSGS, 500);
+const DEFAULT_MAX_STORED = toSafeLimit(process.env.SIGNAL_MCP_MAX_STORED, 100_000);
+const PRUNE_EVERY_N_INSERTS = 100;
 
 export interface MessageBufferOptions {
   /**
@@ -61,6 +63,12 @@ export interface MessageBufferOptions {
    * non-durable buffer — useful for tests or when SIGNAL_MCP_NO_PERSIST is set.
    */
   persistPath?: string;
+  /**
+   * Maximum number of messages to retain. Once exceeded, the oldest rows are
+   * pruned so the store can't grow without bound (e.g. from a contact sending
+   * a high volume of messages). Defaults to SIGNAL_MCP_MAX_STORED or 100,000.
+   */
+  maxStored?: number;
 }
 
 function extractKey(payload: RpcEnvelope): { source: string; ts: number } {
@@ -73,9 +81,12 @@ function extractKey(payload: RpcEnvelope): { source: string; ts: number } {
 export class MessageBuffer {
   private db: Database.Database;
   private insertStmt: Database.Statement;
+  private maxStored: number;
+  private insertsSincePrune = 0;
 
   constructor(options: MessageBufferOptions = {}) {
     const dbPath = options.persistPath ?? ":memory:";
+    this.maxStored = options.maxStored ?? DEFAULT_MAX_STORED;
     if (dbPath !== ":memory:") {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
@@ -133,6 +144,17 @@ export class MessageBuffer {
   add(payload: RpcEnvelope): void {
     const { source, ts } = extractKey(payload);
     this.insertStmt.run(source, ts, JSON.stringify(payload));
+    if (++this.insertsSincePrune >= PRUNE_EVERY_N_INSERTS) {
+      this.insertsSincePrune = 0;
+      this.prune();
+    }
+  }
+
+  /** Delete the oldest rows beyond maxStored, so storage can't grow unbounded. */
+  private prune(): void {
+    this.db
+      .prepare("DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY id DESC LIMIT ?)")
+      .run(this.maxStored);
   }
 
   getRecent(limit = DEFAULT_QUERY_LIMIT): RpcEnvelope[] {
