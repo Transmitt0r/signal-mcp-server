@@ -41,7 +41,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { MessageBuffer, formatEnvelope, parseReceiveResult, type RpcEnvelope } from "./lib.js";
+import { MessageBuffer, formatEnvelope, parseReceiveResult, toSafeLimit, type RpcEnvelope } from "./lib.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -280,7 +280,7 @@ const TOOLS = [
       },
     },
     handler: async (args: Record<string, unknown>) => {
-      const limit = Math.min((args.limit as number) ?? 20, 100);
+      const limit = Math.min(toSafeLimit(args.limit, 20), 100);
       const recent = buffer.getRecent(500); // oldest-first; walk newest-first below
       const seen = new Map<string, string>();
       for (let i = recent.length - 1; i >= 0; i--) {
@@ -316,7 +316,7 @@ const TOOLS = [
     },
     handler: async (args: Record<string, unknown>) => {
       const sender = (args.sender as string) ?? "";
-      const limit = Math.min((args.limit as number) ?? 20, 100);
+      const limit = Math.min(toSafeLimit(args.limit, 20), 100);
       const raw = sender ? buffer.getConversation(sender, limit) : buffer.getRecent(limit);
       if (!raw.length) return "No messages in buffer.";
       const lines = ["📨 **Signal Messages**\n"];

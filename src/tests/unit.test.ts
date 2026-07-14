@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MessageBuffer, formatTimestamp, formatEnvelope, parseReceiveResult, type Envelope, type RpcEnvelope } from "../lib.js";
+import { MessageBuffer, formatTimestamp, formatEnvelope, parseReceiveResult, toSafeLimit, type Envelope, type RpcEnvelope } from "../lib.js";
 
 describe("MessageBuffer (in-memory)", () => {
   let buffer: MessageBuffer;
@@ -226,6 +226,35 @@ describe("MessageBuffer ingest offset tracking", () => {
     const buffer2 = new MessageBuffer({ persistPath: dbPath });
     expect(buffer2.getOffset("receive_log_offset")).toBe(4096);
     buffer2.close();
+  });
+});
+
+describe("toSafeLimit", () => {
+  it("passes through a valid positive number", () => {
+    expect(toSafeLimit(50, 500)).toBe(50);
+  });
+
+  it("parses a numeric string", () => {
+    expect(toSafeLimit("50", 500)).toBe(50);
+  });
+
+  it("falls back for a non-numeric string", () => {
+    expect(toSafeLimit("not-a-number", 500)).toBe(500);
+  });
+
+  it("falls back for NaN, zero, negative, and non-finite values", () => {
+    expect(toSafeLimit(NaN, 500)).toBe(500);
+    expect(toSafeLimit(0, 500)).toBe(500);
+    expect(toSafeLimit(-10, 500)).toBe(500);
+    expect(toSafeLimit(Infinity, 500)).toBe(500);
+  });
+
+  it("falls back for undefined", () => {
+    expect(toSafeLimit(undefined, 500)).toBe(500);
+  });
+
+  it("truncates a non-integer to an integer", () => {
+    expect(toSafeLimit(12.7, 500)).toBe(12);
   });
 });
 

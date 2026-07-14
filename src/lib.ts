@@ -44,7 +44,13 @@ export interface RpcEnvelope {
 // Message Buffer
 // ---------------------------------------------------------------------------
 
-const DEFAULT_QUERY_LIMIT = parseInt(process.env.SIGNAL_MCP_MAX_MSGS ?? "500", 10);
+/** Coerce an arbitrary value to a positive integer, falling back if it isn't one. */
+export function toSafeLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
+}
+
+const DEFAULT_QUERY_LIMIT = toSafeLimit(process.env.SIGNAL_MCP_MAX_MSGS, 500);
 
 export interface MessageBufferOptions {
   /**
