@@ -137,11 +137,15 @@ export class MessageBuffer {
   }
 
   getConversation(sender: string, limit = DEFAULT_QUERY_LIMIT): RpcEnvelope[] {
+    // Escape LIKE wildcards in the caller-supplied sender so e.g. "%" or "_"
+    // can't widen the match beyond the intended substring (would otherwise
+    // match every row for sender="%").
+    const escaped = sender.replace(/[\\%_]/g, "\\$&");
     const rows = this.db
       .prepare(
-        "SELECT payload FROM messages WHERE LOWER(source) LIKE LOWER(?) ORDER BY id DESC LIMIT ?",
+        "SELECT payload FROM messages WHERE LOWER(source) LIKE LOWER(?) ESCAPE '\\' ORDER BY id DESC LIMIT ?",
       )
-      .all(`%${sender}%`, limit) as Array<{ payload: string }>;
+      .all(`%${escaped}%`, limit) as Array<{ payload: string }>;
     return rows.reverse().map((r) => JSON.parse(r.payload) as RpcEnvelope);
   }
 

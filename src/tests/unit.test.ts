@@ -56,6 +56,16 @@ describe("MessageBuffer (in-memory)", () => {
     expect(conv).toHaveLength(2);
   });
 
+  it("treats % and _ in the sender filter as literal characters, not SQL LIKE wildcards", () => {
+    buffer.add({ params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "A" } } } });
+    buffer.add({ params: { envelope: { source: "+492222", timestamp: 2, dataMessage: { message: "B" } } } });
+    buffer.add({ params: { envelope: { source: "+49_underscore", timestamp: 3, dataMessage: { message: "C" } } } });
+
+    expect(buffer.getConversation("%")).toHaveLength(0);
+    expect(buffer.getConversation("_")).toHaveLength(1);
+    expect(buffer.getConversation("_")[0].params!.envelope!.source).toBe("+49_underscore");
+  });
+
   it("getRecent returns messages in chronological order (oldest first)", () => {
     for (let i = 0; i < 5; i++) {
       buffer.add({ params: { envelope: { source: "+49X", timestamp: i, dataMessage: { message: `msg${i}` } } } });
