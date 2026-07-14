@@ -203,7 +203,8 @@ pnpm build
 # Run unit tests (vitest)
 pnpm test:unit
 
-# Run all tests (unit + integration)
+# Run all tests (unit + integration; integration requires a local Docker
+# daemon — it uses testcontainers to spin up signal-cli)
 pnpm test
 
 # Lint (tsc — also covered by build)
