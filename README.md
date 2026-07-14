@@ -7,6 +7,10 @@ MCP (Model Context Protocol) server for Signal messenger. Wraps a running
 [![npm version](https://img.shields.io/npm/v/%40transmitt0r%2Fsignal-mcp-server)](https://www.npmjs.com/package/@transmitt0r/signal-mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> ⚠️ **Known issue:** message ingestion can silently drop inbound messages
+> under a specific stuck-receiver condition. Read
+> [KNOWN_ISSUES.md](KNOWN_ISSUES.md) before deploying this in production.
+
 ## Prerequisites
 
 - [signal-cli](https://github.com/AsamK/signal-cli) daemon running in HTTP mode
@@ -118,6 +122,11 @@ happened to catch at that instant:
   so the file only ever contained daemon startup/shutdown lines, and the
   "durable" path silently ingested nothing. This is exactly the kind of
   environment-specific log-routing assumption that's fragile to depend on.
+
+> ⚠️ **This is not fully solved yet.** The poller can get stuck reporting
+> "already being received" after an abort, silently dropping real inbound
+> messages until it self-heals or the daemon is restarted. See
+> [KNOWN_ISSUES.md](KNOWN_ISSUES.md) before relying on this in production.
 
 **The actual fix**: run the signal-cli daemon with `--receive-mode=manual`.
 This disables the automatic background drain thread entirely, so incoming
