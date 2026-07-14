@@ -102,38 +102,11 @@ export class MessageBuffer {
       );
       CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source);
       CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
-      CREATE TABLE IF NOT EXISTS ingest_state (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
     `);
     this.insertStmt = this.db.prepare(
       "INSERT OR IGNORE INTO messages (source, ts, payload) VALUES (?, ?, ?)",
     );
   }
-
-  /**
-   * Get a durable ingestion checkpoint (e.g. the byte offset the file-tail
-   * reader last processed up to). Returns null if never set. Used so a
-   * restart resumes exactly where it left off instead of re-reading from
-   * the start of a (potentially large) log file, or losing track of
-   * position entirely.
-   */
-  getOffset(key: string): number | null {
-    const row = this.db.prepare("SELECT value FROM ingest_state WHERE key = ?").get(key) as
-      | { value: string }
-      | undefined;
-    if (!row) return null;
-    const n = Number(row.value);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  setOffset(key: string, value: number): void {
-    this.db
-      .prepare("INSERT INTO ingest_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-      .run(key, String(value));
-  }
-
 
   /** Number of messages currently stored (for startup logging, etc.). */
   count(): number {

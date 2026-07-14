@@ -187,60 +187,6 @@ describe("MessageBuffer persistence (SQLite on disk)", () => {
   });
 });
 
-describe("MessageBuffer ingest offset tracking", () => {
-  let tmpDir: string;
-  let dbPath: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signal-mcp-test-"));
-    dbPath = path.join(tmpDir, "messages.db");
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("returns null for an offset that has never been set", () => {
-    const buffer = new MessageBuffer({ persistPath: dbPath });
-    expect(buffer.getOffset("receive_log_offset")).toBeNull();
-    buffer.close();
-  });
-
-  it("stores and retrieves an offset", () => {
-    const buffer = new MessageBuffer({ persistPath: dbPath });
-    buffer.setOffset("receive_log_offset", 1234);
-    expect(buffer.getOffset("receive_log_offset")).toBe(1234);
-    buffer.close();
-  });
-
-  it("updates an existing offset in place (upsert)", () => {
-    const buffer = new MessageBuffer({ persistPath: dbPath });
-    buffer.setOffset("receive_log_offset", 100);
-    buffer.setOffset("receive_log_offset", 500);
-    expect(buffer.getOffset("receive_log_offset")).toBe(500);
-    buffer.close();
-  });
-
-  it("keeps independent offsets per key", () => {
-    const buffer = new MessageBuffer({ persistPath: dbPath });
-    buffer.setOffset("a", 10);
-    buffer.setOffset("b", 20);
-    expect(buffer.getOffset("a")).toBe(10);
-    expect(buffer.getOffset("b")).toBe(20);
-    buffer.close();
-  });
-
-  it("survives a simulated restart (offset persists across instances)", () => {
-    const buffer1 = new MessageBuffer({ persistPath: dbPath });
-    buffer1.setOffset("receive_log_offset", 4096);
-    buffer1.close();
-
-    const buffer2 = new MessageBuffer({ persistPath: dbPath });
-    expect(buffer2.getOffset("receive_log_offset")).toBe(4096);
-    buffer2.close();
-  });
-});
-
 describe("toSafeLimit", () => {
   it("passes through a valid positive number", () => {
     expect(toSafeLimit(50, 500)).toBe(50);
