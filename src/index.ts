@@ -430,7 +430,7 @@ async function main(): Promise<void> {
   }
 
   const server = new Server(
-    { name: "signal-mcp-server", version: "0.4.0" },
+    { name: "signal-mcp-server", version: "0.5.0" },
     { capabilities: { tools: {} } },
   );
 
