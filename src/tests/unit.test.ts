@@ -1,15 +1,23 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { MessageBuffer, formatTimestamp, formatEnvelope, type Envelope, type RpcEnvelope } from "../lib.js";
 
-describe("MessageBuffer", () => {
+describe("MessageBuffer (in-memory)", () => {
   let buffer: MessageBuffer;
 
   beforeEach(() => {
     buffer = new MessageBuffer();
   });
 
+  afterEach(() => {
+    buffer.close();
+  });
+
   it("starts empty", () => {
     expect(buffer.getRecent()).toEqual([]);
+    expect(buffer.count()).toBe(0);
   });
 
   it("stores and retrieves messages", () => {
@@ -30,6 +38,7 @@ describe("MessageBuffer", () => {
     buffer.add(msg);
     buffer.add(msg);
     expect(buffer.getRecent()).toHaveLength(1);
+    expect(buffer.count()).toBe(1);
   });
 
   it("allows same timestamp from different sources", () => {
@@ -47,12 +56,112 @@ describe("MessageBuffer", () => {
     expect(conv).toHaveLength(2);
   });
 
-  it("caps at 500 messages", () => {
+  it("getRecent returns messages in chronological order (oldest first)", () => {
+    for (let i = 0; i < 5; i++) {
+      buffer.add({ params: { envelope: { source: "+49X", timestamp: i, dataMessage: { message: `msg${i}` } } } });
+    }
+    const recent = buffer.getRecent(10);
+    expect(recent.map((m) => m.params!.envelope!.dataMessage!.message)).toEqual(["msg0", "msg1", "msg2", "msg3", "msg4"]);
+  });
+
+  it("respects the limit parameter without capping total storage", () => {
     for (let i = 0; i < 600; i++) {
       buffer.add({ params: { envelope: { source: "+49X", timestamp: i, dataMessage: { message: `msg${i}` } } } });
     }
-    expect(buffer.getRecent(600)).toHaveLength(500);
-    expect(buffer.getRecent(600)[0].params!.envelope!.timestamp).toBe(100);
+    // All 600 are retained (durable store, not a ring buffer) ...
+    expect(buffer.count()).toBe(600);
+    // ... but a query can still ask for just the most recent N.
+    const recent100 = buffer.getRecent(100);
+    expect(recent100).toHaveLength(100);
+    expect(recent100[recent100.length - 1].params!.envelope!.timestamp).toBe(599);
+  });
+});
+
+describe("MessageBuffer persistence (SQLite on disk)", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signal-mcp-test-"));
+    dbPath = path.join(tmpDir, "messages.db");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("creates the database file on construction", () => {
+    const buffer = new MessageBuffer({ persistPath: dbPath });
+    expect(fs.existsSync(dbPath)).toBe(true);
+    buffer.close();
+  });
+
+  it("survives a simulated restart (new instance, same file)", () => {
+    const buffer1 = new MessageBuffer({ persistPath: dbPath });
+    buffer1.add({ params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "before restart" } } } });
+    buffer1.add({ params: { envelope: { source: "+492222", timestamp: 2, dataMessage: { message: "also before restart" } } } });
+    buffer1.close();
+
+    // Simulate a process restart: construct a fresh buffer pointed at the same file.
+    const buffer2 = new MessageBuffer({ persistPath: dbPath });
+    const recent = buffer2.getRecent();
+    expect(recent).toHaveLength(2);
+    expect(recent[0].params!.envelope!.dataMessage!.message).toBe("before restart");
+    expect(recent[1].params!.envelope!.dataMessage!.message).toBe("also before restart");
+    buffer2.close();
+  });
+
+  it("continues persisting new messages after reopening", () => {
+    const buffer1 = new MessageBuffer({ persistPath: dbPath });
+    buffer1.add({ params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "old" } } } });
+    buffer1.close();
+
+    const buffer2 = new MessageBuffer({ persistPath: dbPath });
+    buffer2.add({ params: { envelope: { source: "+492222", timestamp: 2, dataMessage: { message: "new" } } } });
+    expect(buffer2.count()).toBe(2);
+    buffer2.close();
+  });
+
+  it("does not duplicate rows across restarts for the same source:timestamp", () => {
+    const buffer1 = new MessageBuffer({ persistPath: dbPath });
+    const msg: RpcEnvelope = { params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "A" } } } };
+    buffer1.add(msg);
+    buffer1.close();
+
+    const buffer2 = new MessageBuffer({ persistPath: dbPath });
+    buffer2.add(msg); // same source+timestamp, should be ignored
+    expect(buffer2.count()).toBe(1);
+    buffer2.close();
+  });
+
+  it("supports querying by sender across a large history via getConversation", () => {
+    const buffer = new MessageBuffer({ persistPath: dbPath });
+    for (let i = 0; i < 50; i++) {
+      buffer.add({ params: { envelope: { source: "+49BROTHER", timestamp: i, dataMessage: { message: `msg${i}` } } } });
+    }
+    for (let i = 0; i < 50; i++) {
+      buffer.add({ params: { envelope: { source: "+49OTHER", timestamp: 1000 + i, dataMessage: { message: `other${i}` } } } });
+    }
+    const conv = buffer.getConversation("BROTHER", 10);
+    expect(conv).toHaveLength(10);
+    expect(conv.every((m) => m.params!.envelope!.source === "+49BROTHER")).toBe(true);
+    buffer.close();
+  });
+
+  it("creates parent directories for the persist path if needed", () => {
+    const nestedPath = path.join(tmpDir, "nested", "dir", "messages.db");
+    const buffer = new MessageBuffer({ persistPath: nestedPath });
+    buffer.add({ params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "A" } } } });
+    expect(fs.existsSync(nestedPath)).toBe(true);
+    buffer.close();
+  });
+
+  it("without a persistPath, behaves purely in-memory (no file created)", () => {
+    const buffer = new MessageBuffer();
+    buffer.add({ params: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "A" } } } });
+    expect(buffer.getRecent()).toHaveLength(1);
+    expect(fs.existsSync(dbPath)).toBe(false);
+    buffer.close();
   });
 });
 

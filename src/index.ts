@@ -9,11 +9,18 @@
  *   signal-mcp-server --http       # HTTP on default port 3100
  *
  * Environment variables:
- *   SIGNAL_HTTP_URL     — signal-cli HTTP endpoint (default: http://127.0.0.1:8080)
- *   SIGNAL_ACCOUNT      — phone number for display (optional)
- *   SIGNAL_MCP_MAX_MSGS — max messages to buffer (default: 500)
+ *   SIGNAL_HTTP_URL        — signal-cli HTTP endpoint (default: http://127.0.0.1:8080)
+ *   SIGNAL_ACCOUNT         — phone number for display (optional)
+ *   SIGNAL_MCP_MAX_MSGS    — max messages returned per query by default (default: 500)
+ *   SIGNAL_MCP_STATE_DIR   — directory for the persisted message database
+ *                            (default: $XDG_STATE_HOME/signal-mcp-server or
+ *                            ~/.local/state/signal-mcp-server)
+ *   SIGNAL_MCP_NO_PERSIST  — set to "1"/"true" to disable disk persistence
+ *                            entirely (buffer is memory-only, legacy behavior)
  */
 
+import * as os from "node:os";
+import * as path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -31,11 +38,23 @@ import { MessageBuffer, formatEnvelope, type RpcEnvelope } from "./lib.js";
 const SIGNAL_HTTP_URL = process.env.SIGNAL_HTTP_URL ?? "http://127.0.0.1:8080";
 const SIGNAL_ACCOUNT = process.env.SIGNAL_ACCOUNT ?? "";
 
+const NO_PERSIST = /^(1|true)$/i.test(process.env.SIGNAL_MCP_NO_PERSIST ?? "");
+const STATE_DIR =
+  process.env.SIGNAL_MCP_STATE_DIR ??
+  path.join(process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state"), "signal-mcp-server");
+const PERSIST_PATH = NO_PERSIST ? ":memory:" : path.join(STATE_DIR, "messages.db");
+
 // ---------------------------------------------------------------------------
 // Message Buffer
 // ---------------------------------------------------------------------------
 
-const buffer = new MessageBuffer();
+const buffer = new MessageBuffer({ persistPath: PERSIST_PATH });
+if (!NO_PERSIST) {
+  console.error(`[signal-mcp] Persisting message history to ${PERSIST_PATH} (SQLite)`);
+  console.error(`[signal-mcp] ${buffer.count()} message(s) available from prior sessions`);
+} else {
+  console.error(`[signal-mcp] Persistence disabled (SIGNAL_MCP_NO_PERSIST set) — buffer is memory-only`);
+}
 
 // ---------------------------------------------------------------------------
 // SSE consumer
@@ -375,6 +394,7 @@ async function main(): Promise<void> {
     const shutdown = () => {
       console.error("[signal-mcp] Shutting down...");
       stopSseConsumer();
+      buffer.close();
       httpServer.close();
       process.exit(0);
     };

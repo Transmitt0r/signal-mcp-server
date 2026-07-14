@@ -76,9 +76,11 @@ docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-- `SIGNAL_HTTP_URL` | `http://127.0.0.1:8080` | signal-cli HTTP endpoint |
+| `SIGNAL_HTTP_URL` | `http://127.0.0.1:8080` | signal-cli HTTP endpoint |
 | `SIGNAL_ACCOUNT` | `""` | Phone number for display (optional) |
-| `SIGNAL_MCP_MAX_MSGS` | `500` | Max messages to buffer in memory |
+| `SIGNAL_MCP_MAX_MSGS` | `500` | Default number of messages returned per query when no explicit limit is given |
+| `SIGNAL_MCP_STATE_DIR` | `$XDG_STATE_HOME/signal-mcp-server` (falls back to `~/.local/state/signal-mcp-server`) | Directory holding the persisted message database (`messages.db`) |
+| `SIGNAL_MCP_NO_PERSIST` | unset | Set to `1`/`true` to disable disk persistence entirely (buffer becomes memory-only, matching pre-persistence behavior) |
 
 ## Architecture
 
@@ -89,17 +91,26 @@ uses two main components:
   (`/api/v1/events`) and parses Server-Sent Events into `RpcEnvelope` objects.
   An `AbortController` allows clean shutdown on `SIGINT`/`SIGTERM`.
 
-- **Message buffer**: An in-memory ring buffer that stores the most recent
-  messages (configurable via `SIGNAL_MCP_MAX_MSGS`, default 500). Messages are
-  deduplicated using a `source:timestamp` composite key. Tools like
-  `signal_read_messages` and `signal_list_conversations` query this buffer
-  rather than making additional RPC calls, keeping latency low.
+- **Message buffer**: Backed by a local SQLite database
+  (`$SIGNAL_MCP_STATE_DIR/messages.db`, via `better-sqlite3`) rather than an
+  in-memory ring buffer. Every message received is durably written as it
+  arrives; a `UNIQUE(source, ts)` constraint handles deduplication, and
+  indexes on `source` and `ts` keep sender/time-range lookups fast even as
+  history grows. `signal_read_messages` and `signal_list_conversations` query
+  this store directly.
+
+  This means a restart of the MCP server, or of the signal-cli daemon it
+  depends on, no longer loses message history — the whole point of keeping
+  history around for tools that only see it "since last restart" otherwise.
+  Set `SIGNAL_MCP_NO_PERSIST=1` to opt out and run purely in-memory (data is
+  lost on restart, as in earlier versions).
 
 The MCP server registers six tools (`signal_list_contacts`, `signal_list_groups`,
 `signal_list_conversations`, `signal_read_messages`, `signal_send_message`,
 `signal_send_reaction`) and exposes them via stdio (default) or Streamable HTTP.
 
 ## Development
+
 
 ```bash
 # Install dependencies

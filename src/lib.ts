@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import Database from "better-sqlite3";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -40,40 +44,82 @@ export interface RpcEnvelope {
 // Message Buffer
 // ---------------------------------------------------------------------------
 
-const MAX_MESSAGE_BUFFER = parseInt(process.env.SIGNAL_MCP_MAX_MSGS ?? "500", 10);
+const DEFAULT_QUERY_LIMIT = parseInt(process.env.SIGNAL_MCP_MAX_MSGS ?? "500", 10);
+
+export interface MessageBufferOptions {
+  /**
+   * Path to a SQLite database file used to persist messages across process
+   * restarts. When set (the default in index.ts), every new message is
+   * durably written here and survives restarts of the MCP server or the
+   * signal-cli daemon. Pass ":memory:" (or omit) for a purely in-memory,
+   * non-durable buffer — useful for tests or when SIGNAL_MCP_NO_PERSIST is set.
+   */
+  persistPath?: string;
+}
+
+function extractKey(payload: RpcEnvelope): { source: string; ts: number } {
+  const env = payload.params?.envelope;
+  const ts = env?.timestamp ?? 0;
+  const source = env?.source ?? env?.sourceNumber ?? env?.sourceUuid ?? "";
+  return { source, ts };
+}
 
 export class MessageBuffer {
-  private messages: RpcEnvelope[] = [];
-  private seen = new Set<string>();
+  private db: Database.Database;
+  private insertStmt: Database.Statement;
+
+  constructor(options: MessageBufferOptions = {}) {
+    const dbPath = options.persistPath ?? ":memory:";
+    if (dbPath !== ":memory:") {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    }
+    this.db = new Database(dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        source    TEXT NOT NULL,
+        ts        INTEGER NOT NULL,
+        payload   TEXT NOT NULL,
+        UNIQUE(source, ts)
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source);
+      CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+    `);
+    this.insertStmt = this.db.prepare(
+      "INSERT OR IGNORE INTO messages (source, ts, payload) VALUES (?, ?, ?)",
+    );
+  }
+
+  /** Number of messages currently stored (for startup logging, etc.). */
+  count(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number };
+    return row.n;
+  }
 
   add(payload: RpcEnvelope): void {
-    const env = payload.params?.envelope;
-    const ts = env?.timestamp ?? 0;
-    const source = env?.source ?? env?.sourceNumber ?? env?.sourceUuid ?? "";
-    const key = `${source}:${ts}`;
-    if (this.seen.has(key)) return;
-    this.seen.add(key);
-    this.messages.push(payload);
-    if (this.messages.length > MAX_MESSAGE_BUFFER) {
-      this.messages = this.messages.slice(-MAX_MESSAGE_BUFFER);
-    }
+    const { source, ts } = extractKey(payload);
+    this.insertStmt.run(source, ts, JSON.stringify(payload));
   }
 
-  getRecent(limit = 50): RpcEnvelope[] {
-    return this.messages.slice(-limit);
+  getRecent(limit = DEFAULT_QUERY_LIMIT): RpcEnvelope[] {
+    const rows = this.db
+      .prepare("SELECT payload FROM messages ORDER BY id DESC LIMIT ?")
+      .all(limit) as Array<{ payload: string }>;
+    return rows.reverse().map((r) => JSON.parse(r.payload) as RpcEnvelope);
   }
 
-  getConversation(sender: string, limit = 50): RpcEnvelope[] {
-    const results: RpcEnvelope[] = [];
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const env = this.messages[i]?.params?.envelope;
-      const src = env?.source ?? env?.sourceNumber ?? env?.sourceUuid ?? "";
-      if (src.toLowerCase().includes(sender.toLowerCase())) {
-        results.push(this.messages[i]);
-        if (results.length >= limit) break;
-      }
-    }
-    return results;
+  getConversation(sender: string, limit = DEFAULT_QUERY_LIMIT): RpcEnvelope[] {
+    const rows = this.db
+      .prepare(
+        "SELECT payload FROM messages WHERE LOWER(source) LIKE LOWER(?) ORDER BY id DESC LIMIT ?",
+      )
+      .all(`%${sender}%`, limit) as Array<{ payload: string }>;
+    return rows.reverse().map((r) => JSON.parse(r.payload) as RpcEnvelope);
+  }
+
+  close(): void {
+    this.db.close();
   }
 }
 
