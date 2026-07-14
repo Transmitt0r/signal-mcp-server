@@ -17,6 +17,11 @@
  *                              ~/.local/state/signal-mcp-server)
  *   SIGNAL_MCP_NO_PERSIST    — set to "1"/"true" to disable disk persistence
  *                              entirely (buffer is memory-only, legacy behavior)
+ *   SIGNAL_MCP_HTTP_TOKEN    — required bearer token for the HTTP transport.
+ *                              Requests must send `Authorization: Bearer <token>`.
+ *                              Refuses to start in --http mode without this set.
+ *   SIGNAL_MCP_HTTP_HOST     — interface to bind the HTTP transport to
+ *                              (default: 127.0.0.1, i.e. loopback-only)
  *
  * IMPORTANT: the signal-cli daemon this server talks to MUST be started with
  * `--receive-mode=manual` (in addition to `--http`). Messages then stay
@@ -417,6 +422,17 @@ async function main(): Promise<void> {
   });
 
   if (httpMode) {
+    const httpToken = process.env.SIGNAL_MCP_HTTP_TOKEN ?? "";
+    if (!httpToken) {
+      console.error(
+        "[signal-mcp] Refusing to start HTTP transport: SIGNAL_MCP_HTTP_TOKEN is not set. " +
+          "The HTTP transport can send/read Signal messages, so it requires a bearer token. " +
+          "Set SIGNAL_MCP_HTTP_TOKEN to a random secret and send it as `Authorization: Bearer <token>`.",
+      );
+      process.exit(1);
+    }
+    const httpHost = process.env.SIGNAL_MCP_HTTP_HOST ?? "127.0.0.1";
+
     // Streamable HTTP transport (Node.js)
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode
@@ -426,11 +442,6 @@ async function main(): Promise<void> {
     const http = await import("node:http");
 
     const httpServer = http.createServer(async (req, res) => {
-      // CORS headers
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
       if (req.method === "OPTIONS") {
         res.writeHead(204);
         res.end();
@@ -441,6 +452,13 @@ async function main(): Promise<void> {
       if (req.method === "GET" && req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      const authHeader = req.headers.authorization ?? "";
+      if (authHeader !== `Bearer ${httpToken}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
         return;
       }
 
@@ -458,8 +476,8 @@ async function main(): Promise<void> {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
 
-    httpServer.listen(httpPort, () => {
-      console.error(`[signal-mcp] HTTP server listening on http://0.0.0.0:${httpPort}`);
+    httpServer.listen(httpPort, httpHost, () => {
+      console.error(`[signal-mcp] HTTP server listening on http://${httpHost}:${httpPort}`);
       console.error(`[signal-mcp]   POST / — JSON-RPC (tools/list, tools/call, etc.)`);
       console.error(`[signal-mcp]   GET  / — SSE event stream (for GET requests)`);
     });

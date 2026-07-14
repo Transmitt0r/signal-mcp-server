@@ -38,8 +38,13 @@ mcp_servers:
 
 ### HTTP transport
 
+The HTTP transport can send/read Signal messages, so it requires a bearer
+token and refuses to start without one. By default it binds to
+`127.0.0.1` only; set `SIGNAL_MCP_HTTP_HOST` to change that (e.g. to expose
+it inside a Docker network).
+
 ```bash
-signal-mcp-server --http 3100
+SIGNAL_MCP_HTTP_TOKEN=$(openssl rand -hex 32) signal-mcp-server --http 3100
 ```
 
 Then call tools via JSON-RPC:
@@ -47,6 +52,7 @@ Then call tools via JSON-RPC:
 ```bash
 curl -X POST http://localhost:3100/ \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <token>' \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":"1"}'
 ```
 
@@ -83,6 +89,8 @@ docker run -e SIGNAL_HTTP_URL=http://host.docker.internal:8080 \
 | `SIGNAL_MCP_MAX_MSGS` | `500` | Default number of messages returned per query when no explicit limit is given |
 | `SIGNAL_MCP_STATE_DIR` | `$XDG_STATE_HOME/signal-mcp-server` (falls back to `~/.local/state/signal-mcp-server`) | Directory holding the persisted message database (`messages.db`) |
 | `SIGNAL_MCP_NO_PERSIST` | unset | Set to `1`/`true` to disable disk persistence entirely (buffer becomes memory-only, matching pre-persistence behavior) |
+| `SIGNAL_MCP_HTTP_TOKEN` | none (required for `--http`) | Bearer token clients must send as `Authorization: Bearer <token>` when using the HTTP transport |
+| `SIGNAL_MCP_HTTP_HOST` | `127.0.0.1` | Interface the HTTP transport binds to |
 
 ## Message ingestion: why `--receive-mode=manual` is required
 
