@@ -14,5 +14,5 @@ WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
 EXPOSE 3100
-ENV SIGNAL_HTTP_URL=http://127.0.0.1:8081
+ENV SIGNAL_HTTP_URL=http://127.0.0.1:8080
 CMD ["node", "dist/index.js"]
