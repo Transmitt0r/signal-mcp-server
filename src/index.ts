@@ -126,10 +126,20 @@ let receivePollStopped = false;
 
 function ingestReceiveResult(result: unknown): number {
   const envelopes = parseReceiveResult(result);
+  let ingested = 0;
   for (const envelope of envelopes) {
-    buffer.add({ params: { envelope } });
+    try {
+      buffer.add({ params: { envelope } });
+      ingested++;
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err);
+      console.error(
+        `[signal-mcp] Failed to persist an envelope (source=${envelope.source ?? envelope.sourceNumber ?? "?"}, ` +
+          `ts=${envelope.timestamp ?? "?"}): ${msg}`,
+      );
+    }
   }
-  return envelopes.length;
+  return ingested;
 }
 
 async function receiveOnce(): Promise<"ok" | "already-receiving" | "error"> {
