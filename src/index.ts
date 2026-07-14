@@ -391,11 +391,22 @@ const TOOLS = [
 // Main
 // ---------------------------------------------------------------------------
 
+const DEFAULT_HTTP_PORT = 3100;
+
+/** Find a valid TCP port number among CLI args, ignoring flags like `--http`. */
+function parsePortArg(args: string[], fallback: number): number {
+  for (const a of args) {
+    if (a.startsWith("-")) continue;
+    const n = Number(a);
+    if (Number.isInteger(n) && n > 0 && n <= 65535) return n;
+  }
+  return fallback;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const httpMode = args.includes("--http");
-  const httpPortArg = args.find((a) => !a.startsWith("-") && !isNaN(Number(a)));
-  const httpPort = httpPortArg ? parseInt(httpPortArg, 10) : 3100;
+  const httpPort = parsePortArg(args, DEFAULT_HTTP_PORT);
 
   console.error("[signal-mcp] Starting Signal MCP Server");
   console.error(`[signal-mcp]   Transport: ${httpMode ? `HTTP (port ${httpPort})` : "stdio"}`);
