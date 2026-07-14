@@ -17,14 +17,17 @@
  *                              ~/.local/state/signal-mcp-server)
  *   SIGNAL_MCP_NO_PERSIST    — set to "1"/"true" to disable disk persistence
  *                              entirely (buffer is memory-only, legacy behavior)
- *   SIGNAL_MCP_RECEIVE_LOG   — path to signal-cli's JSON receive log (see below).
- *                              When set, this becomes the PRIMARY ingestion
- *                              source instead of the SSE stream.
+ *
+ * IMPORTANT: the signal-cli daemon this server talks to MUST be started with
+ * `--receive-mode=manual` (in addition to `--http`). Messages then stay
+ * queued server-side (on Signal's own infrastructure) until this process
+ * pulls them via the JSON-RPC `receive` method, instead of being drained
+ * unconditionally by signal-cli's default on-start background thread. See
+ * README.md's "Message ingestion" section for the full rationale.
  */
 
 import * as os from "node:os";
 import * as path from "node:path";
-import * as fs from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -33,7 +36,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { MessageBuffer, formatEnvelope, type RpcEnvelope } from "./lib.js";
+import { MessageBuffer, formatEnvelope, parseReceiveResult, type RpcEnvelope } from "./lib.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -41,7 +44,6 @@ import { MessageBuffer, formatEnvelope, type RpcEnvelope } from "./lib.js";
 
 const SIGNAL_HTTP_URL = process.env.SIGNAL_HTTP_URL ?? "http://127.0.0.1:8080";
 const SIGNAL_ACCOUNT = process.env.SIGNAL_ACCOUNT ?? "";
-const RECEIVE_LOG_PATH = process.env.SIGNAL_MCP_RECEIVE_LOG ?? "";
 
 const NO_PERSIST = /^(1|true)$/i.test(process.env.SIGNAL_MCP_NO_PERSIST ?? "");
 const STATE_DIR =
@@ -62,250 +64,119 @@ if (!NO_PERSIST) {
 }
 
 // ---------------------------------------------------------------------------
-// Receive-log tailer (primary ingestion path, when configured)
+// Receive poller (sole ingestion path)
 // ---------------------------------------------------------------------------
 //
-// signal-cli's daemon keeps a permanent, always-on receive thread from boot
-// (--receive-mode on-start) that drains the server queue regardless of
-// whether anyone is listening on the HTTP/SSE endpoint. Its *default*
-// receive handler — the one wired up when the daemon is started with
-// `-o json` and its stdout redirected to a file (e.g. via systemd's
-// `StandardOutput=append:/path/to/receive.jsonl`) — is registered as a
-// STRONG listener, unlike the SSE endpoint's weak one. That means every
-// envelope gets written to this file unconditionally, independent of
-// whether signal-mcp-server (or anything else) is connected at the time.
+// Architecture note (see also README.md "Message ingestion" section):
 //
-// Tailing that file instead of (or in addition to) the SSE stream is what
-// actually closes the message-loss gap: we track a durable byte offset in
-// the SQLite buffer's ingest_state table, so on startup we resume exactly
-// where we left off and catch up on anything written while we were down —
-// something the SSE stream can never provide (see the SSE consumer's
-// doc comment below for why).
+// Earlier versions of this server ingested messages via signal-cli's SSE
+// stream (`/api/v1/events`), optionally backed by a receive-log file tailer
+// for durability. Both approaches shared a structural problem: signal-cli's
+// default receive mode (`--receive-mode=on-start`) runs a background thread
+// that drains the server-side message queue unconditionally, the instant
+// the daemon starts, regardless of whether anything is listening. Once a
+// message is drained this way, it is gone from Signal's servers — the only
+// copies are whatever our SSE "weak listener" happened to catch while
+// connected, and (in theory) whatever landed in a redirected receive-log
+// file. In practice we found the log-tailer's assumption wrong for our
+// deployment: signal-cli's own startup/shutdown lines went to the
+// redirected file but per-message envelope logging came out on stderr
+// instead, so the "durable" ingestion path never actually saw any messages
+// — SSE alone was silently doing all the work, with its dropped-while-
+// disconnected gap intact. Fixing this against a real log-routing quirk
+// isn't a stable foundation; the class of bug can resurface with any
+// signal-cli or systemd change.
 //
-// This is opt-in via SIGNAL_MCP_RECEIVE_LOG because it requires the
-// operator to have configured signal-cli's daemon with `-o json` and a
-// StandardOutput=append: (or equivalent) redirect; see README.md.
+// The actual fix is running the daemon with `--receive-mode=manual`
+// (systemd ExecStart, not a code change here) so the background drain
+// thread never runs. Messages then sit safely in Signal's *server-side*
+// queue — genuinely undeleted, not just "buffered somewhere on this box" —
+// until explicitly pulled via the JSON-RPC `receive` method, which
+// signal-cli's changelog documents as being "available in JSON-RPC daemon
+// mode, for polling new messages." We long-poll it in a loop below. If this
+// process is down for an hour, nothing is lost: the next `receive` call
+// simply returns everything that queued up meanwhile.
+//
+// IMPORTANT constraint (verified empirically against signal-cli 0.14.6):
+// only one "receiver" may be active against a given account at a time.
+// Both the SSE endpoint and a manual `receive` call count as a receiver,
+// and calling `receive` while another is outstanding returns "Receive
+// command cannot be used if messages are already being received." This is
+// why this poller is the *only* ingestion path now — running it alongside
+// an SSE consumer would just make them fight over the single-receiver slot
+// (whichever connects first blocks the other, non-deterministically).
+//
+// Requires the signal-cli daemon to be started with `--receive-mode=manual`
+// (see README.md). If it's still running in the default `on-start` mode,
+// every `receive` call here will fail with that same "already being
+// received" error, because the daemon's own background thread holds the
+// slot. We log that condition distinctly so it's diagnosable rather than
+// silently retried forever.
 
-const RECEIVE_LOG_OFFSET_KEY = "receive_log_offset";
-let receiveLogWatcher: fs.FSWatcher | null = null;
-let receiveLogPollTimer: NodeJS.Timeout | null = null;
-let receiveLogTailing = false;
+const RECEIVE_POLL_TIMEOUT_SECONDS = 55; // long-poll duration per request
+const RECEIVE_POLL_RETRY_MS = 2000; // pause between polls on error/empty-but-fast-return
 
-function parseReceiveLogLine(line: string): void {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  // signal-cli's plain slf4j startup/warning lines also land in this file
-  // (they share stdout with the JSON receive handler); only JSON objects
-  // starting with "{" are ours to parse.
-  if (!trimmed.startsWith("{")) return;
-  try {
-    const payload = JSON.parse(trimmed);
-    if (payload && typeof payload === "object" && payload.envelope) {
-      buffer.add({ params: { envelope: payload.envelope } });
-    }
-  } catch {
-    // Not valid JSON (e.g. a wrapped/truncated log line) — skip it rather
-    // than crash the tailer.
+let receivePollAbort: AbortController | null = null;
+let receivePollStopped = false;
+
+function ingestReceiveResult(result: unknown): number {
+  const envelopes = parseReceiveResult(result);
+  for (const envelope of envelopes) {
+    buffer.add({ params: { envelope } });
   }
+  return envelopes.length;
 }
 
-function tailReceiveLogOnce(): void {
-  if (receiveLogTailing) return;
-  receiveLogTailing = true;
+async function receiveOnce(): Promise<"ok" | "already-receiving" | "error"> {
+  receivePollAbort = new AbortController();
   try {
-    const stat = fs.statSync(RECEIVE_LOG_PATH, { throwIfNoEntry: false });
-    if (!stat) return;
-
-    let offset = buffer.getOffset(RECEIVE_LOG_OFFSET_KEY) ?? 0;
-    // File was truncated/rotated (e.g. logrotate) since our last read —
-    // restart from the beginning rather than seeking past EOF forever.
-    if (offset > stat.size) {
-      console.error(`[signal-mcp] Receive log appears truncated/rotated (offset ${offset} > size ${stat.size}), restarting from 0`);
-      offset = 0;
-    }
-    if (offset >= stat.size) return; // nothing new
-
-    const fd = fs.openSync(RECEIVE_LOG_PATH, "r");
-    try {
-      const length = stat.size - offset;
-      const chunk = Buffer.alloc(length);
-      fs.readSync(fd, chunk, 0, length, offset);
-      const text = chunk.toString("utf8");
-      const lines = text.split("\n");
-      // The last element of split("\n") is either "" (if text ends with \n,
-      // meaning all lines are complete) or a partial trailing line with no
-      // newline yet. Either way, drop it from what we process now — hold it
-      // back until more data arrives rather than parsing/consuming it early.
-      const completeLines = lines.slice(0, -1);
-      const consumedLength = completeLines.reduce((sum, l) => sum + l.length + 1, 0);
-
-      for (const line of completeLines) {
-        parseReceiveLogLine(line);
-      }
-      buffer.setOffset(RECEIVE_LOG_OFFSET_KEY, offset + consumedLength);
-    } finally {
-      fs.closeSync(fd);
-    }
+    const result = await rpc(
+      "receive",
+      { timeout: RECEIVE_POLL_TIMEOUT_SECONDS },
+      (RECEIVE_POLL_TIMEOUT_SECONDS + 15) * 1000,
+    );
+    const n = ingestReceiveResult(result);
+    if (n > 0) console.error(`[signal-mcp] Ingested ${n} message(s) via receive poll`);
+    return "ok";
   } catch (err) {
-    console.error(`[signal-mcp] Failed to tail receive log: ${err}`);
+    const msg = (err as Error)?.message ?? String(err);
+    if (/already being received/i.test(msg)) {
+      console.error(
+        "[signal-mcp] receive poll blocked: signal-cli daemon already has an active receiver. " +
+          "This means the daemon is NOT running with --receive-mode=manual (or something else is " +
+          "polling it). Fix the daemon's systemd unit; see README.md.",
+      );
+      return "already-receiving";
+    }
+    console.error(`[signal-mcp] receive poll error: ${msg}`);
+    return "error";
   } finally {
-    receiveLogTailing = false;
+    receivePollAbort = null;
   }
 }
 
-function startReceiveLogTailer(): void {
-  console.error(`[signal-mcp] Tailing signal-cli receive log: ${RECEIVE_LOG_PATH}`);
-  const priorOffset = buffer.getOffset(RECEIVE_LOG_OFFSET_KEY);
+async function startReceivePoller(): Promise<void> {
   console.error(
-    priorOffset !== null
-      ? `[signal-mcp] Resuming receive log tail from byte offset ${priorOffset} (catching up on anything written while we were down)`
-      : "[signal-mcp] No prior offset recorded — starting from the beginning of the receive log",
+    `[signal-mcp] Starting receive poller (long-poll ${RECEIVE_POLL_TIMEOUT_SECONDS}s against ${SIGNAL_HTTP_URL}/api/v1/rpc)`,
   );
-
-  // Catch up immediately on whatever's already there (covers the gap since
-  // our last run), then watch for new writes.
-  tailReceiveLogOnce();
-
-  try {
-    receiveLogWatcher = fs.watch(RECEIVE_LOG_PATH, { persistent: true }, () => tailReceiveLogOnce());
-  } catch (err) {
-    console.error(`[signal-mcp] fs.watch failed (${err}), falling back to polling every 2s`);
-  }
-  // Belt-and-suspenders: some filesystems/append patterns don't reliably
-  // fire fs.watch events (e.g. certain network filesystems, or systemd
-  // rotating StandardOutput journals). Poll as a backstop.
-  receiveLogPollTimer = setInterval(tailReceiveLogOnce, 2000);
-}
-
-function stopReceiveLogTailer(): void {
-  if (receiveLogWatcher) {
-    receiveLogWatcher.close();
-    receiveLogWatcher = null;
-  }
-  if (receiveLogPollTimer) {
-    clearInterval(receiveLogPollTimer);
-    receiveLogPollTimer = null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// SSE consumer
-// ---------------------------------------------------------------------------
-//
-// IMPORTANT: signal-cli does NOT queue/replay missed messages for SSE
-// clients. Its daemon keeps a permanent, always-on receive thread (started
-// at daemon boot via --receive-mode on-start) that continuously drains the
-// server queue and deletes each envelope from its on-disk cache the instant
-// it's handed to handlers — regardless of whether any SSE client is
-// connected. Our SSE subscription is registered as a "weak" handler
-// (HttpServerHandler#subscribeReceiveHandlers, isWeakListener=true): it only
-// receives whatever arrives while the HTTP connection is open. There is no
-// backlog to drain on reconnect — a message that arrives while we're
-// disconnected is gone for good, full stop.
-//
-// If SIGNAL_MCP_RECEIVE_LOG is configured, the tailer above is the primary
-// ingestion path and actually closes this gap (see its doc comment). This
-// SSE consumer still runs so things keep working out of the box without
-// that extra signal-cli configuration step; in that mode, the best we can
-// do is minimize our OWN reconnect latency. Previously this used a flat 5s
-// delay on every retry, including the very first retry right after our own
-// restart — pure dead time in the exact window most likely to lose a
-// message (our deploys/restarts). Now we retry immediately with a short
-// exponential backoff (250ms, 500ms, 1s, 2s, capped at 5s), and log how
-// long we were actually disconnected so gaps are diagnosable.
-
-
-let sseAbortController: AbortController | null = null;
-
-const SSE_RETRY_BASE_MS = 250;
-const SSE_RETRY_MAX_MS = 5000;
-
-function startSseConsumer(): void {
-  const eventsUrl = `${SIGNAL_HTTP_URL}/api/v1/events`;
-  console.error(`[signal-mcp] SSE consumer starting: ${eventsUrl}`);
-
-  sseAbortController = new AbortController();
-  const signal = sseAbortController.signal;
-  let retryAttempt = 0;
-  let disconnectedAt: number | null = null;
-
-  const scheduleRetry = () => {
-    if (signal.aborted) return;
-    const delay = Math.min(SSE_RETRY_BASE_MS * 2 ** retryAttempt, SSE_RETRY_MAX_MS);
-    retryAttempt += 1;
-    setTimeout(poll, delay);
-  };
-
-  const poll = async () => {
-    if (signal.aborted) return;
-
-    try {
-      const resp = await fetch(eventsUrl, { signal });
-      if (!resp.ok || !resp.body) {
-        console.error(`[signal-mcp] SSE: response status ${resp.status}, retrying`);
-        scheduleRetry();
-        return;
-      }
-
-      // Connected: reset backoff and report how long we were dark, if this
-      // was a reconnect rather than the initial startup connection.
-      retryAttempt = 0;
-      if (disconnectedAt !== null) {
-        const gapMs = Date.now() - disconnectedAt;
-        console.error(`[signal-mcp] SSE reconnected after ${gapMs}ms disconnected`);
-        disconnectedAt = null;
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (!signal.aborted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) !== -1) {
-          const raw = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const trimmed = raw.trim();
-          if (!trimmed || trimmed.startsWith(":")) continue;
-
-          const dataLine = trimmed.split("\n").find((l) => l.startsWith("data: "));
-          if (!dataLine) continue;
-
-          try {
-            const payload = JSON.parse(dataLine.slice(6));
-            if (payload.envelope) {
-              buffer.add({ params: { envelope: payload.envelope } });
-            }
-          } catch {
-            // skip parse errors
-          }
-        }
-      }
-      if (!signal.aborted) {
-        disconnectedAt = Date.now();
-        console.error("[signal-mcp] SSE stream ended, reconnecting immediately");
-      }
-    } catch (err) {
-      if ((err as Error)?.name === "AbortError") return;
-      disconnectedAt ??= Date.now();
-      console.error(`[signal-mcp] SSE connection error: ${err}, retrying`);
+  receivePollStopped = false;
+  while (!receivePollStopped) {
+    const outcome = await receiveOnce();
+    if (receivePollStopped) break;
+    if (outcome !== "ok") {
+      // Back off before retrying so a persistently misconfigured daemon
+      // doesn't spin a tight error loop.
+      await new Promise((r) => setTimeout(r, RECEIVE_POLL_RETRY_MS));
     }
-    scheduleRetry();
-  };
-
-  poll();
+    // On "ok" (including an empty result — a normal long-poll timeout),
+    // loop immediately into the next poll; there's no gap to sleep during
+    // since messages queue safely server-side.
+  }
 }
 
-
-function stopSseConsumer(): void {
-  if (sseAbortController) {
-    sseAbortController.abort();
-    sseAbortController = null;
-  }
+function stopReceivePoller(): void {
+  receivePollStopped = true;
+  receivePollAbort?.abort();
 }
 
 // ---------------------------------------------------------------------------
@@ -507,20 +378,11 @@ async function main(): Promise<void> {
   console.error(`[signal-mcp]   Signal-cli: ${SIGNAL_HTTP_URL}`);
   console.error(`[signal-mcp]   Account: ${SIGNAL_ACCOUNT ? SIGNAL_ACCOUNT.slice(0, 8) + "..." : "(not set)"}`);
 
-  // Start message ingestion: the receive-log tailer if configured (closes
-  // the message-loss gap; see its doc comment), and always the SSE
-  // consumer too (works out of the box, cheap to keep running, and its
-  // dedup-on-insert means double-ingesting the same message via both paths
-  // is harmless).
-  if (RECEIVE_LOG_PATH) {
-    startReceiveLogTailer();
-  } else {
-    console.error(
-      "[signal-mcp] SIGNAL_MCP_RECEIVE_LOG not set — relying on SSE only. " +
-        "Messages received while disconnected will be lost; see README.md to close this gap.",
-    );
-  }
-  startSseConsumer();
+  // Start the receive poller (sole ingestion path; see its doc comment for
+  // why SSE + file-tailing were both removed). Runs in the background —
+  // don't await it, it loops until stopReceivePoller() is called on
+  // shutdown.
+  void startReceivePoller();
 
   // Verify daemon connectivity
   try {
@@ -531,7 +393,7 @@ async function main(): Promise<void> {
   }
 
   const server = new Server(
-    { name: "signal-mcp-server", version: "0.3.0" },
+    { name: "signal-mcp-server", version: "0.4.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -588,8 +450,7 @@ async function main(): Promise<void> {
     // Graceful shutdown
     const shutdown = () => {
       console.error("[signal-mcp] Shutting down...");
-      stopSseConsumer();
-      stopReceiveLogTailer();
+      stopReceivePoller();
       buffer.close();
       httpServer.close();
       process.exit(0);
@@ -607,6 +468,16 @@ async function main(): Promise<void> {
   } else {
     // Stdio transport
     const transport = new StdioServerTransport();
+
+    const shutdown = () => {
+      console.error("[signal-mcp] Shutting down...");
+      stopReceivePoller();
+      buffer.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
     await server.connect(transport);
     console.error("[signal-mcp] Server running on stdio transport");
   }

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MessageBuffer, formatTimestamp, formatEnvelope, type Envelope, type RpcEnvelope } from "../lib.js";
+import { MessageBuffer, formatTimestamp, formatEnvelope, parseReceiveResult, type Envelope, type RpcEnvelope } from "../lib.js";
 
 describe("MessageBuffer (in-memory)", () => {
   let buffer: MessageBuffer;
@@ -265,5 +265,65 @@ describe("formatEnvelope", () => {
     const env: Envelope = { source: "+491****6789", timestamp: 1700000000000 };
     const result = formatEnvelope(env);
     expect(result).toContain("unknown message type");
+  });
+});
+
+describe("parseReceiveResult", () => {
+  it("returns an empty array for an empty result (normal long-poll timeout)", () => {
+    expect(parseReceiveResult([])).toEqual([]);
+  });
+
+  it("returns an empty array for null/undefined", () => {
+    expect(parseReceiveResult(null)).toEqual([]);
+    expect(parseReceiveResult(undefined)).toEqual([]);
+  });
+
+  it("parses the bare notification array shape: [{ envelope: {...} }, ...]", () => {
+    const result = [
+      { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "hi" } } },
+      { envelope: { source: "+492222", timestamp: 2, dataMessage: { message: "there" } } },
+    ];
+    const envelopes = parseReceiveResult(result);
+    expect(envelopes).toHaveLength(2);
+    expect(envelopes[0].source).toBe("+491111");
+    expect(envelopes[1].dataMessage?.message).toBe("there");
+  });
+
+  it("parses the subscription-wrapper shape: [{ result: { envelope: {...} } }, ...]", () => {
+    const result = [{ result: { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "wrapped" } } } }];
+    const envelopes = parseReceiveResult(result);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].dataMessage?.message).toBe("wrapped");
+  });
+
+  it("handles a single non-array object result", () => {
+    const result = { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "single" } } };
+    const envelopes = parseReceiveResult(result);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].dataMessage?.message).toBe("single");
+  });
+
+  it("skips malformed entries without throwing", () => {
+    const result = [
+      null,
+      42,
+      "a string",
+      { noEnvelopeHere: true },
+      { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "survivor" } } },
+    ];
+    expect(() => parseReceiveResult(result)).not.toThrow();
+    const envelopes = parseReceiveResult(result);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].dataMessage?.message).toBe("survivor");
+  });
+
+  it("handles a mix of both known shapes in the same batch", () => {
+    const result = [
+      { envelope: { source: "+491111", timestamp: 1, dataMessage: { message: "bare" } } },
+      { result: { envelope: { source: "+492222", timestamp: 2, dataMessage: { message: "wrapped" } } } },
+    ];
+    const envelopes = parseReceiveResult(result);
+    expect(envelopes).toHaveLength(2);
+    expect(envelopes.map((e) => e.dataMessage?.message)).toEqual(["bare", "wrapped"]);
   });
 });

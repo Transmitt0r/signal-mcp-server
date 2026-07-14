@@ -194,3 +194,40 @@ export function formatEnvelope(envelope: Envelope): string {
   const nameStr = source ? ` (${source})` : "";
   return `[${dt}] ${sourceNumber}${nameStr}: ${msg}${quotedText}${attachmentInfo}`;
 }
+
+// ---------------------------------------------------------------------------
+// Receive-poll result parsing
+// ---------------------------------------------------------------------------
+//
+// signal-cli's `receive` JSON-RPC method (polled with signal-cli daemons
+// started with `--receive-mode=manual`) returns an array of envelope
+// notifications once messages have arrived (or an empty array on a
+// long-poll timeout with nothing new). The exact wrapper shape has drifted
+// across signal-cli versions in the wild — this parses defensively so a
+// minor version difference doesn't silently drop messages.
+
+/**
+ * Extract `Envelope` objects from a `receive` RPC result, handling the
+ * known response shapes:
+ *   - `[{ envelope: {...} }, ...]` (bare notification array — the
+ *     documented on-start/manual push shape)
+ *   - `[{ result: { envelope: {...} } }, ...]` (subscribeReceive-style
+ *     subscription wrapper)
+ *   - a single object of either shape above (non-array result)
+ * Malformed or unrecognized entries are skipped rather than throwing, so
+ * one bad entry can't crash the poll loop.
+ */
+export function parseReceiveResult(result: unknown): Envelope[] {
+  const items: unknown[] = Array.isArray(result) ? result : result ? [result] : [];
+  const envelopes: Envelope[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const envelope = (obj.envelope ??
+      (obj.result as Record<string, unknown> | undefined)?.envelope) as Envelope | undefined;
+    if (envelope && typeof envelope === "object") {
+      envelopes.push(envelope);
+    }
+  }
+  return envelopes;
+}
